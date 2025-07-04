@@ -13,3 +13,4 @@ Make small edits here to test:
 | Commit   | Description                |
 |----------|----------------------------|
 | test-01  | First validation trial     |
+| test-02  | Split PR Gate workflow into separate named jobs for branch protection |
