@@ -1,0 +1,101 @@
+name: PR Gate - GitOps Validation
+
+on:
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  validate-gitops:
+    name: GitOps Manifest Validation (Argo CD)
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install tools (kube-linter, yq)
+      run: |
+        echo "Installing kube-linter..."
+        curl -L https://github.com/stackrox/kube-linter/releases/download/v0.6.8/kube-linter-linux.tar.gz | tar xz
+        sudo mv kube-linter /usr/local/bin/
+
+        echo "Installing yq..."
+        sudo snap install yq
+
+    - name: Run kube-linter
+      run: |
+        echo "Running kube-linter..."
+        cat > .kube-linter.yaml << 'EOF'
+        checks:
+          addAllBuiltIn: true
+          exclude:
+            - "default-service-account"
+            - "dnsconfig-options"
+            - "minimum-three-replicas"
+            - "no-liveness-probe"
+            - "no-node-affinity"
+            - "no-readiness-probe"
+            - "no-rolling-update-strategy"
+            - "non-isolated-pod"
+            - "privileged-ports"
+            - "read-secret-from-env-var"
+            - "required-annotation-email"
+            - "required-label-owner"
+        EOF
+
+        status=0
+        for file in $(find . -name "*.yaml" -o -name "*.yml" | grep -E "(environments|step-)"); do
+          echo "Linting: $file"
+          if grep -q "kind: SealedSecret" "$file"; then
+            echo "Skipping SealedSecret: $file"
+            continue
+          fi
+          kube-linter lint "$file" --config .kube-linter.yaml || status=1
+        done
+
+        if [ "$status" -ne 0 ]; then
+          echo "❌ kube-linter failed."
+          exit 1
+        fi
+
+    - name: Validate Argo CD Application manifests
+      run: |
+        echo "Validating Argo CD Application manifests..."
+        status=0
+        for app in $(find environments -name "*-app.yaml"); do
+          echo "🔍 Validating: $app"
+
+          if ! yq e . "$app" > /dev/null 2>&1; then
+            echo "❌ Invalid YAML: $app"
+            status=1
+            continue
+          fi
+
+          kind=$(yq e '.kind' "$app")
+          path=$(yq e '.spec.source.path' "$app")
+          repo=$(yq e '.spec.source.repoURL' "$app")
+
+          if [ "$kind" != "Application" ]; then
+            echo "❌ Missing kind: Application in $app"
+            status=1
+          fi
+
+          if [ -z "$path" ] || [ ! -d "$path" ]; then
+            echo "❌ Invalid or missing path: $path"
+            status=1
+          else
+            echo "✅ Path exists: $path"
+          fi
+
+          if [ -z "$repo" ]; then
+            echo "❌ Missing repoURL in $app"
+            status=1
+          fi
+        done
+
+        if [ "$status" -ne 0 ]; then
+          echo "❌ Argo CD Application validation failed."
+          exit 1
+        else
+          echo "✅ All Argo CD Application manifests are valid."
+        fi

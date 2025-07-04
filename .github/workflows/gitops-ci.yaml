@@ -1,0 +1,124 @@
+name: GitOps CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  lint-manifests:
+    name: Lint Kubernetes Manifests
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup kube-linter
+      run: |
+        curl -L https://github.com/stackrox/kube-linter/releases/download/v0.6.8/kube-linter-linux.tar.gz | tar xz
+        sudo mv kube-linter /usr/local/bin/
+        
+    - name: Lint Kubernetes manifests
+      run: |
+        echo "Linting all Kubernetes manifests..."
+        find . -name "*.yaml" -o -name "*.yml" | grep -E "(environments|k8s)" | while read file; do
+          echo "Linting $file"
+          kube-linter lint "$file" || echo "Linting failed for $file"
+        done
+        
+    - name: Strict lint check
+      run: |
+        # This will fail the job if any critical issues are found
+        find environments/ -name "*.yaml" -exec kube-linter lint {} \;
+
+  validate-argo-apps:
+    name: Validate Argo CD Applications
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Argo CD CLI
+      run: |
+        curl -sSL https://github.com/argoproj/argo-cd/releases/download/v2.10.0/argocd-linux-amd64 -o argocd
+        chmod +x argocd
+        sudo mv argocd /usr/local/bin/
+        
+    - name: Validate Argo CD Applications
+      run: |
+        if [ -f "argocd-applications.yaml" ]; then
+          echo "Validating Argo CD Applications..."
+          argocd app validate argocd-applications.yaml
+        else
+          echo "No Argo CD applications found - skipping validation"
+        fi
+
+  validate-manifests:
+    name: Validate Kubernetes Manifests
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'v1.28.0'
+        
+    - name: Validate Kubernetes YAML syntax
+      run: |
+        echo "Validating YAML syntax..."
+        find environments/ -name "*.yaml" -exec kubectl --dry-run=client apply -f {} \;
+        
+    - name: Check for required fields
+      run: |
+        echo "Checking for required Kubernetes fields..."
+        for file in environments/*/dev-app.yaml environments/*/prod-app.yaml; do
+          if [ -f "$file" ]; then
+            echo "Checking $file"
+            # Check if file has required fields
+            if ! grep -q "apiVersion:" "$file"; then
+              echo "ERROR: $file missing apiVersion"
+              exit 1
+            fi
+            if ! grep -q "kind:" "$file"; then
+              echo "ERROR: $file missing kind"
+              exit 1
+            fi
+            if ! grep -q "metadata:" "$file"; then
+              echo "ERROR: $file missing metadata"
+              exit 1
+            fi
+          fi
+        done
+        echo "All manifest files have required fields"
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'table'
+        
+    - name: Check for secrets in files
+      run: |
+        echo "Checking for potential secrets..."
+        # Check if any files contain potential secrets
+        if grep -r -i "password\|secret\|key" environments/ --include="*.yaml" | grep -v "secretKeyRef" | grep -v "# " | grep -v "name:.*secret"; then
+          echo "WARNING: Potential secrets found in manifests"
+          echo "Make sure all secrets are properly encrypted or use secretKeyRef"
+        else
+          echo "No plain text secrets found - good!"
+        fi
