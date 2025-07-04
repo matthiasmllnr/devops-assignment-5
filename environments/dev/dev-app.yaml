@@ -19,11 +19,82 @@ spec:
         app: todo-app-dev
     spec:
       containers:
-      - name: nginx
-        image: nginx:1.21
+      - name: php-apache
+        image: php:8.1-apache
         ports:
         - containerPort: 80
-          hostPort: 8091
+        env:
+        - name: WEATHER_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: weather-api-secret
+              key: api-key
+        volumeMounts:
+        - name: html-config
+          mountPath: /var/www/html
+      volumes:
+      - name: html-config
+        configMap:
+          name: weather-html-config
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: weather-html-config
+  namespace: todo-dev
+data:
+  index.php: |
+    <?php
+    $apiKey = $_ENV['WEATHER_API_KEY'] ?? '';
+    $apiUrl = "https://api.openweathermap.org/data/2.5/weather?q=Wien,AT&appid={$apiKey}&units=metric";
+
+    $response = @file_get_contents($apiUrl);
+    $weather = $response ? json_decode($response, true) : null;
+    ?>
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Weather Vienna</title>
+        <style>
+            body {
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                background: linear-gradient(to bottom right, #e0f7fa, #ffffff);
+                text-align: center;
+                margin: 50px;
+            }
+            .location {
+                font-size: 28px;
+                color: #34495e;
+                margin: 20px 0;
+            }
+            .temp {
+                font-size: 80px;
+                font-weight: 600;
+                color: #2c3e50;
+                margin: 30px 0;
+                text-shadow: 1px 1px 2px rgba(0,0,0,0.1);
+            }
+            .secret-info {
+                font-size: 16px;
+                color: #7f8c8d;
+                margin-top: 40px;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="location">Vienna, Austria</div>
+
+        <?php if ($weather && isset($weather['main']['temp'])): ?>
+            <div class="temp"><?php echo round($weather['main']['temp']); ?>°C</div>
+        <?php else: ?>
+            <div class="temp">--°C</div>
+        <?php endif; ?>
+
+        <div class="secret-info">
+            API Key: <?php echo $apiKey ? 'Loaded from Kubernetes Secret' : 'Not Found'; ?>
+        </div>
+    </body>
+    </html>
 ---
 apiVersion: v1
 kind: Service
@@ -37,3 +108,17 @@ spec:
   - port: 80
     targetPort: 80
   type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: todo-app-dev-external
+  namespace: todo-dev
+spec:
+  selector:
+    app: todo-app-dev
+  ports:
+  - port: 80
+    targetPort: 80
+    nodePort: 30091
+  type: NodePort
